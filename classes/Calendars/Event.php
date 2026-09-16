@@ -122,6 +122,9 @@ class Calendars_Event extends Base_Calendars_Event
 	 * @param {integer} $fromTime The earliest endTime of the stream
 	 * @param {integer} $untilTime The earliest startTime of the stream
 	 * @param {string|array} [$going] Filter by either "yes" or "no" or "maybe"
+	 * @param {array} [$options] Options to pass to Streams::participating()
+	 *  and Streams::related(). For example you can pass "dontFilterUsers",
+	 *  but don't pass "limit" because we apply a customer filter.
 	 * @return {array} The streams, filtered by the above parameters
 	 */
 	static function participating(
@@ -235,6 +238,63 @@ class Calendars_Event extends Base_Calendars_Event
 		}
 
 		Streams_Notification::resume();
+	}
+	/**
+	 * Resolve whatever timezone a client sent into something DateTimeZone
+	 * accepts, or fail with an error naming the field that is wrong.
+	 *
+	 * Every caller below eventually does `new DateTimeZone($timezoneName)`,
+	 * and that constructor throws on an empty or unknown value — which, from
+	 * a browser's point of view, arrives as an opaque
+	 * "Unknown or bad timezone ()" with a stack trace rather than as a field
+	 * error it could show or retry. Two clients can legitimately be missing
+	 * the name: an older browser with no Intl, and any composer whose
+	 * timezone select ended up with nothing selected. Both of them do send
+	 * the numeric offset, so prefer that over failing.
+	 *
+	 * @method normalizeTimezone
+	 * @static
+	 * @param {string} [$timezoneName] An IANA name ("America/New_York") or a
+	 *  GMT offset string ("GMT-7"), as the event composer's select produces.
+	 * @param {string|integer} [$timezoneOffset] Fallback, used only when
+	 *  $timezoneName is empty: minutes *behind* UTC, i.e. exactly what
+	 *  JavaScript's Date#getTimezoneOffset() returns. The sign is therefore
+	 *  the opposite of the one in the string this returns.
+	 * @return {string} A value `new DateTimeZone()` will accept.
+	 * @throws {Q_Exception_BadValue} If a timezone was supplied and is unusable.
+	 * @throws {Q_Exception_RequiredField} If neither argument yields a zone.
+	 */
+	static function normalizeTimezone($timezoneName, $timezoneOffset = null)
+	{
+		if (is_string($timezoneName) and $timezoneName !== '') {
+			try {
+				new DateTimeZone($timezoneName);
+			} catch (Exception $e) {
+				throw new Q_Exception_BadValue(array(
+					'internal' => 'timezoneName',
+					'problem' => "no such timezone: $timezoneName"
+				), 'timezoneName');
+			}
+			return $timezoneName;
+		}
+		if (is_numeric($timezoneOffset)) {
+			$minutes = -(int)round($timezoneOffset); // flip: JS counts westward
+			if ($minutes < -12 * 60 or $minutes > 14 * 60) {
+				throw new Q_Exception_BadValue(array(
+					'internal' => 'timezone',
+					'problem' => "offset out of range: $timezoneOffset"
+				), 'timezone');
+			}
+			return sprintf(
+				'%s%02d:%02d',
+				$minutes < 0 ? '-' : '+',
+				intdiv(abs($minutes), 60),
+				abs($minutes) % 60
+			);
+		}
+		throw new Q_Exception_RequiredField(
+			array('field' => 'timezoneName'), 'timezoneName'
+		);
 	}
 	/**
 	 * Used to start a new group
@@ -439,6 +499,22 @@ class Calendars_Event extends Base_Calendars_Event
             $timezoneName = $locationStream->getAttribute('timeZone');
 		}
 
+		// With no location there is nothing to look a zone up from, so whatever
+		// the client sent is all there is. Validate it here, once, rather than
+		// letting DateTimeZone() throw below with a message that names no field
+		// — a livestream event satisfies the required-field check above on the
+		// livestream URL alone, which is how an empty timezoneName got this far.
+		// Scoped to the branches that actually construct a DateTimeZone: a
+		// caller supplying startTime/endTime outright (the recurring handler,
+		// Calendars_Availability) never needs a zone, and must not start
+		// failing for want of one.
+		if (!$locationStream
+		and (!$startTime or (!$endTime and $localEndDateTime))) {
+			$timezoneName = self::normalizeTimezone(
+				$timezoneName, Q::ifset($r, 'timezone', null)
+			);
+		}
+
 		if (!$startTime) {
 			if ($locationStream) {
 				$startTime = (int)self::calculateStartTime($localStartDateTime, $locationStream);
@@ -623,7 +699,7 @@ class Calendars_Event extends Base_Calendars_Event
 		if($r['teleconference'] && class_exists('Media_WebRTC') && method_exists('Media_WebRTC', 'scheduleOrUpdateRoomStream')) {
 			$webrtcAndLivestream = Media_WebRTC::scheduleOrUpdateRoomStream(null, null, $r['teleconferenceData']);
 			if(isset($webrtcAndLivestream['livestreamStream'])) {
-				$webrtcAndLivestream['livestreamStream']->relateTo($event, 'Calendars/event/livestream', null, $o);
+				$webrtcAndLivestream['livestreamStream']->relateTo($event, 'Media/livestream', null, $o);
 			}
 			if(isset($webrtcAndLivestream['webrtcStream'])) {
 				$webrtcAndLivestream['webrtcStream']->relateTo($event, 'Calendars/event/webrtc', null, $o);
@@ -644,10 +720,16 @@ class Calendars_Event extends Base_Calendars_Event
 	 */
 	static function relateToCommunity($event, $communityId) {
 		$communityEventsCategory = Calendars::stream($communityId);
+		$cn = $communityEventsCategory->name;
 		$startTime = $event->getAttribute('startTime');
+		$endTime = $event->getAttribute('endTime');
 		$event->relateTo($communityEventsCategory, 'Calendars/events', null, array(
 			'skipAccess' => true,
-			'weight' => $startTime
+			'weight' => $startTime,
+			'extra' => array($cn => array(
+				'startTime' => $startTime,
+				'endTime' => $endTime
+			))
 		));
 	}
 	/**
@@ -842,7 +924,8 @@ class Calendars_Event extends Base_Calendars_Event
 	 * @param {boolean} [$options.paid] Send along with skipPayment if we want to indicate the event was already paid for
 	 * @param {Boolean} [$options.skipRecurringParticipant=false] If true don't manage recurring participant
 	 * @param {Boolean} [$options.skipSubscription=false] If true skip subscription to stream
-	 * @param {bool} [$options.autoCharge=false] If true, do payment if required. If false, throw exception.
+	 * @param {bool} [$options.autoCharge=false] If true, automatically charge the payment method if possible. If false, throw exception.
+	 *   This may surprise and upset some users, so the option only works if you also set "Calendars"/"events"/"allowAutoCharge" config
 	 * @param {array} [$options.relatedParticipants] If defined array of related participants, relate all of them to event.
 	 * Array format: array(array("publisherId" => ..., "streamName" => ...), ...)
 	 * @throws Streams_Exception_Full
@@ -1000,11 +1083,15 @@ class Calendars_Event extends Base_Calendars_Event
 							Users::communityId(), 
 							$userId, 
 							$resAmount,
-                            Assets::JOINED_PAID_STREAM,
+                            Calendars::EVENT_PARTICIPATION,
 							array_merge($options, array(
 								'toPublisherId' => $stream->publisherId,
 								'toStreamName' => $stream->name,
+								// charge in the currency the event was priced in,
+								// matching what Assets_Credits::getPaymentsInfo() reads
+								'currency' => Q::ifset($payment, 'currency', 'credits'),
 								'autoCharge' => $options['autoCharge']
+									&& Q_Config::get('Calendars', 'events', 'allowAutoCharge', false)
 							))
 						);
 						if (!empty($result['success'])) {
@@ -1187,7 +1274,7 @@ class Calendars_Event extends Base_Calendars_Event
     }
 
 	/**
-	 * Subscribe user on Calendars/event/livestream/started messages (when user clicks "Notify me when live" in event tool on front-end)
+	 * Subscribe user on Media/livestream/started messages (when user clicks "Notify me when live" in event tool on front-end)
 	 * @method subscribeOnLivestreamStart
 	 * @static
 	 * @param {Streams_Stream} $stream Event stream
@@ -1844,7 +1931,7 @@ class Calendars_Event extends Base_Calendars_Event
 					null,
 					$streamEvent->publisherId,
 					$streamEvent->name,
-					'Calendars/event/livestream',
+					'Media/livestream',
 					$relatedStream['publisherId'],
 					$relatedStream['streamName'],
 					array('skipAccess' => true)
@@ -1878,8 +1965,11 @@ class Calendars_Event extends Base_Calendars_Event
 		if (!$type or !$what) {
 			return false;
 		}
+		$messageType = ($type === 'livestream') 
+			? "Media/livestream/$what" 
+			: "Calendars/event/$type/$what";
 		$streamEvent->post($streamEvent->publisherId, array(
-			'type' => "Calendars/event/$type/$what", //Calendars/event/livestream/started
+			'type' => $messageType,
 			'instructions' => $instructions
 		), true);
 		return true;

@@ -50,12 +50,12 @@ Calendars.Event = {
 		});
 
 		// for web
-		if (Q.info.isMobile && !Q.info.isCordova) {
+		if (!Q.info.isCordova) {
 			var src = publisherId + '/' + eventId;
 			if (action === 'add') {
 				if (Q.info.platform === 'ios') {
 					src = src + '/add.ics';
-				} else if (Q.info.platform === 'android') {
+				} else { // if (Q.info.platform === 'android') {
 					src = src + '/add.gcal';
 				}
 			} else if (action === "delete") {
@@ -71,18 +71,20 @@ Calendars.Event = {
 
 			src = Q.url(src);
 
-			if (Q.info.platform === 'ios') {
-				var iframe = document.createElement('iframe');
-				iframe.setAttribute('src', src);
-				iframe.setAttribute("style", "display: none;");
-				Q.addEventListener(iframe, 'load', function _Q_formPost_loaded() {
-					Q.removeElement(iframe);
-				});
-				document.body.appendChild(iframe);
-				Q.handle(onComplete);
-			} else if (Q.info.platform === 'android') {
-				Q.handle(onComplete);
-				window.location.href = src;
+			var iframe = document.createElement('iframe');
+			iframe.setAttribute('src', src);
+			iframe.setAttribute("style", "display: none;");
+			Q.addEventListener(iframe, 'load', function _Q_formPost_loaded() {
+				Q.removeElement(iframe);
+			});
+			document.body.appendChild(iframe);
+			Q.handle(onComplete);
+
+			if (Q.info.platform !== 'ios') {
+				// try opening a google calendar link in a new tab,
+				// especially works on android where people are likely
+				// to have a calendar app that can handle it
+				window.open(src, '_blank');	
 			}
 
 			return;
@@ -180,8 +182,10 @@ Calendars.Event = {
 					}
 
 					Q.confirm(text.prompt, function (res) {
-						// nevermind what user reply,
-						// need to call this event to avoid multiple questions.
+						// regardless of the user's reply, we need to call
+						// onComplete to avoid multiple questions. 
+						// If user agreed, we will call onSuccess inside onComplete, 
+						// and if not - just call onComplete without parameters.
 						Q.handle(onComplete);
 
 						if (!res){
@@ -224,6 +228,123 @@ Calendars.Event = {
 	 */
 	removeFromCalendar: function (publisherId, eventId) {
 		this.handleCalendar(publisherId, eventId, "delete");
+	},
+	/**
+	 * Show a dialog letting the user choose how to add an event to their calendar.
+	 * Presents buttons for Google Calendar, Outlook, and iCalendar (.ics download).
+	 * @method addToCalendarDialog
+	 * @static
+	 * @param {String} publisherId Event stream publisher id
+	 * @param {String} eventId Last part of event stream name (Calendars/event/[eventId])
+	 * @param {Object} [options]
+	 * @param {String} [options.title] Custom dialog title
+	 * @param {String} [options.className] Extra CSS class(es) for the dialog
+	 */
+	addToCalendarDialog: function (publisherId, eventId, options) {
+		options = options || {};
+		var timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+		var baseSrc = Q.url(publisherId + '/' + eventId);
+		var qs = '?timeZone=' + encodeURIComponent(timeZone);
+
+		Q.Text.get('Calendars/content', function (err, content) {
+			var text = Q.getObject(['event', 'addToCalendar'], content) || {};
+			var title = options.title
+				|| Q.getObject(['dialog', 'title'], text)
+				|| "Add Event to Calendar";
+
+			var formats = [
+				{ key: 'ics',     label: text.ics     || 'iCalendar' },
+				{ key: 'gcal',    label: text.gcal    || 'Google' },
+				{ key: 'outlook', label: text.outlook || 'Outlook' }
+			];
+
+			var $buttons = $('<div class="Calendars_addToCalendar_buttons" />');
+
+			Q.each(formats, function (i, format) {
+				var src = baseSrc + '/add.' + format.key + qs;
+				$('<a />')
+					.attr({
+						'href': '#addToCalendar_' + format.key,
+						'id': 'Calendars_addToCalendar_' + format.key
+					})
+					.addClass('Calendars_addToCalendar_button')
+					.css({'display': 'inline-block', 'vertical-align': 'middle'})
+					.append(
+						$('<img />').attr({
+							alt: format.label,
+							src: Q.url('{{Calendars}}/img/formats/' + format.key + '.png')
+						}),
+						$('<div />').text(format.label)
+					)
+					.on(Q.Pointer.fastclick, function () {
+						if (format.key === 'ics') {
+							// download .ics via hidden iframe
+							var iframe = document.createElement('iframe');
+							iframe.setAttribute('src', src);
+							iframe.setAttribute('style', 'display: none;');
+							Q.addEventListener(iframe, 'load', function () {
+								Q.removeElement(iframe);
+							});
+							document.body.appendChild(iframe);
+							if (Q.info.platform !== 'ios') {
+								window.open(src, '_blank');
+							}
+						} else {
+							// gcal and outlook open directly
+							window.open(src, '_blank');
+						}
+						Q.Dialogs.pop();
+						var path = ['addToCalendar', 'added', publisherId, eventId];
+						Q.Cache.local('Calendars').set(path, true);
+						return false;
+					})
+					.appendTo($buttons);
+			});
+
+			Q.Dialogs.push({
+				title: title,
+				content: $('<div class="Calendars_addToCalendar_content" />')
+					.append($buttons),
+				elementId: 'Calendars_addToCalendar_dialog',
+				className: 'Calendars_addToCalendar_dialog '
+					+ (options.className || ''),
+				onClose: function () {
+					$(this).remove();
+				}
+			});
+		});
+	},
+	/**
+	 * Show a dialog listing everyone participating in an event,
+	 * grouped by "going" and sorted by first name, then last name.
+	 * The server only serves the data to event admins and screeners.
+	 * @method attendanceDialog
+	 * @static
+	 * @param {String} publisherId Event stream publisher id
+	 * @param {String} eventId Last part of event stream name (Calendars/event/[eventId])
+	 * @param {Object} [options]
+	 * @param {String} [options.title] Custom dialog title
+	 * @param {String} [options.className] Extra CSS class(es) for the dialog
+	 * @param {Function} [options.onSelect] Called with (userId, person, element)
+	 */
+	attendanceDialog: function (publisherId, eventId, options) {
+		options = options || {};
+
+		Q.Text.get('Calendars/content', function (err, content) {
+			var text = Q.getObject(['attendance'], content) || {};
+
+			Q.Dialogs.push({
+				title: options.title || text.Title || "Attendance",
+				className: 'Calendars_attendance_dialog '
+					+ (options.className || ''),
+				content: $('<div />').tool('Calendars/attendance', {
+					publisherId: publisherId,
+					eventId: eventId,
+					onSelect: options.onSelect || new Q.Event()
+				}),
+				destroyOnClose: true
+			});
+		});
 	},
 	onUpdateParticipants: new Q.Event(),
 	/**
@@ -357,6 +478,55 @@ Calendars.Event = {
 		qBadgeTool.refresh();
 	},
 	/**
+	 * Compute the badge types for a participant, the same way the event tool
+	 * does. Pure — no DOM side effects — so other tools (such as
+	 * Calendars/attendance) can render identical badges.
+	 * @method participantTypes
+	 * @static
+	 * @param {Streams_Participant} participant
+	 * @param {Object} [options]
+	 * @param {Boolean} [options.paymentRequired] whether the event requires payment
+	 * @return {Array} pass this as the "type" of updateParticipants
+	 */
+	participantTypes: function (participant, options) {
+		var type = [];
+		var k;
+
+		var leaderRoles = ['leader', 'host', 'speaker', 'staff'];
+		for (k = 0; k < leaderRoles.length; k++) {
+			if (participant.testRoles(leaderRoles[k])) {
+				type.push(leaderRoles[k]);
+				break;
+			}
+		}
+
+		var attendeeRoles = ['attendee', 'arrived'];
+		for (k = 0; k < attendeeRoles.length; k++) {
+			if (participant.testRoles(attendeeRoles[k])) {
+				type.push(attendeeRoles[k]);
+				break;
+			}
+		}
+
+		var statusRoles = ['rejected', 'requested', 'registered'];
+		for (k = 0; k < statusRoles.length; k++) {
+			if (participant.testRoles(statusRoles[k])) {
+				type.push(statusRoles[k]);
+				break;
+			}
+		}
+
+		if (Q.getObject("paymentRequired", options)) {
+			switch (participant.getExtra('paid')) {
+				case 'reserved': type.push('paid-reserved'); break;
+				case 'fully':    type.push('paid-fully');    break;
+				default:         type.push('paid-no');
+			}
+		}
+
+		return type;
+	},
+	/**
 	 * Get interests from event (for back compatibility)
 	 * @method getInterests
 	 * @static
@@ -373,22 +543,41 @@ Calendars.Event = {
 	 * @param {function} [onAvatarScanned] callback called after scanned avatar activated. Pass avatar tool as context.
 	 *  marked "checked in" with participant.setExtra("checkin", true)
 	 */
-	scanEventCheckinQRCodes: function (stream, onAvatarScanned) {
-		var eventTool = this;
+	scanEventCheckinQRCodes: function (stream, onAvatarScanned, eventTool) {
+		// called as Calendars.Event.scanEventCheckinQRCodes(...), so "this" is
+		// the static object, not a tool — take the tool explicitly, and only
+		// fall back to "this" when it actually looks like a tool.
+		eventTool = eventTool
+			|| (this && this.element ? this : null);
 
-		// need to add/remove Q_working
-		var $button = $(".Calendars_aspect_checkin", eventTool.element);
+		// need to add/remove Q_working. Scoped to the tool when we have one,
+		// otherwise we'd grab the button of every event tool on the page.
+		var $button = eventTool
+			? $(".Calendars_aspect_checkin", eventTool.element)
+			: $();
+
+		// the camera decodes the same code many times a second, so remember
+		// who we just sent and don't hammer the server (or stack up alerts)
+		var lastUserId = null;
+
+		function _clearScannedAvatar() {
+			$(".Calendars_event_scanning_avatar").each(function () {
+				// remove the tool too, not just the element
+				Q.Tool.remove(this, true, true);
+			});
+		}
 
 		// make this button inactive
 		$button.addClass("Q_working");
 
-		// on scanner close - remove Q_working
-		Q.Camera.Scan.onClose.set(function(){
-			Q.Tool.remove($(".Calendars_event_scanning_avatar")[0], true, true);
+		// on scanner close - remove Q_working. Keyed, so repeated scanning
+		// sessions replace this handler instead of piling up.
+		Q.Camera.Scan.onClose.set(function () {
+			_clearScannedAvatar();
+			lastUserId = null;
 			$button.removeClass("Q_working");
-		});
-
-		var lastUserId = null;
+			Q.Camera.Scan.onClose.remove('Calendars.checkin');
+		}, 'Calendars.checkin');
 
 		// run QR scanner
 		Q.Camera.Scan.animatedQR(function _request(fields) {
@@ -397,23 +586,42 @@ Calendars.Event = {
 			// also has optional fields: "join"
 			// todo: check s and e and if they are invalid, ask user
 			// to regenerate QR code on their "me" page
+
+			// same person still in frame — ignore. A "join" retry is a
+			// deliberate second call, so let that one through.
+			if (fields.u && fields.u === lastUserId && !fields.join) {
+				return;
+			}
+			lastUserId = fields.u;
+
 			Q.req('Calendars/checkin',
 				['participating', 'message'],
 				function (err, result) {
 					var fem = Q.firstErrorMessage(err, result);
 					if (fem) {
+						lastUserId = null; // let them try again
 						return Q.alert("Error: " + fem);
 					}
 
+					var slots = Q.getObject('slots', result) || {};
+					// this used to read "participated", which the server never
+					// sets, so the check always passed and the join branch
+					// below was unreachable. The slot is "participating".
+					var participating = slots.participating;
+
 					// if user is participating - that's all fine, just exit
-					if (Q.getObject(['slots', 'participated'], result) !== false) {
-						var message = Q.getObject(['slots', 'message'], result);
+					if (participating !== false) {
+						var message = slots.message;
 						if (message) {
 							Q.alert(message);
 						}
 
+						// no need to mark them here: Calendars/checkin already
+						// granted "attendee" (or "arrived" when the event needs
+						// payment they haven't made)
+
 						// stop showing previous avatar
-						$(".Calendars_event_scanning_avatar").remove();
+						_clearScannedAvatar();
 
 						// show users avatar above video element
 						var avatar = $('<div />')
@@ -434,9 +642,10 @@ Calendars.Event = {
 
 					// if user wasn't participating, ask whether to make them join the stream
 					Q.Text.get('Calendars/content', function (err, text) {
-						var question = Q.getObject(['slots', 'message'], result);
+						var question = slots.message;
 						Q.confirm(question, function (res) {
 							if (!res){
+								lastUserId = null;
 								return;
 							}
 							// set new param "join", now user will join and checkin
@@ -466,6 +675,45 @@ Calendars.Event = {
 				mode: "scanQR"
 			}
 		});
+	},
+	/**
+	 * Check a participant in to an event from the attendance sheet, or undo it.
+	 *
+	 * The server writes the same roles Calendars/checkin does: "attendee"
+	 * when they're checked in, or "arrived" when the event requires payment,
+	 * they haven't paid, and the caller isn't an admin who can approve it.
+	 * Only event admins and screeners are allowed to call this.
+	 *
+	 * @method setAttending
+	 * @static
+	 * @param {String} publisherId Event stream publisher id
+	 * @param {String} eventId Last part of event stream name
+	 * @param {String} userId Whose participation to mark
+	 * @param {Boolean} attending
+	 * @param {Function} [callback] Called with (err, participantFields)
+	 */
+	setAttending: function (publisherId, eventId, userId, attending, callback) {
+		Q.req('Calendars/attending', ['participant', 'attending'],
+			function (err, response) {
+				var msg = Q.firstErrorMessage(err, response && response.errors);
+				if (msg) {
+					console.warn("Calendars.Event.setAttending: " + msg);
+					return Q.handle(callback, null, [msg]);
+				}
+				Q.handle(callback, null, [
+					null,
+					Q.getObject(['slots', 'participant'], response),
+					Q.getObject(['slots', 'attending'], response)
+				]);
+			}, {
+				method: 'post',
+				fields: {
+					publisherId: publisherId,
+					eventId: eventId,
+					userId: userId,
+					attending: attending ? 1 : 0
+				}
+			});
 	},
 	onStarted: new Q.Event.factory(null, ["", ""]),
 	onEnded: new Q.Event.factory(null, ["", ""])
@@ -895,9 +1143,9 @@ Q.Streams.onMessage('', 'Calendars/payment/skip')
 
 	
 // show Q.Notice when somebody opened webrtc in chat where current user participated
-Q.Streams.onMessage('', 'Calendars/event/livestream/started')
+Q.Streams.onMessage('', 'Media/livestream/started')
 .set(function (message) {
-	console.log('Calendars/event/livestream/started', message, arguments);
+	console.log('Media/livestream/started', message, arguments);
 	var instructions = JSON.parse(message.instructions);
 	var livestreamStreamName = instructions.streamName;
 	var livestreamStreamPublisherId = instructions.publisherId;
@@ -1055,6 +1303,10 @@ Q.Tool.define({
 			'{{Q}}/pickadate/themes/default.css',
 			'{{Q}}/pickadate/themes/default.date.css'
 		]
+	},
+	"Calendars/attendance": {
+		js: "{{Calendars}}/js/tools/attendance.js",
+		css: "{{Calendars}}/css/attendance.css"
 	},
 	"Calendars/recurring": "{{Calendars}}/js/tools/recurring.js",
 	"Calendars/payment": "{{Calendars}}/js/tools/payment.js",

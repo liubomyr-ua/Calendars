@@ -157,6 +157,16 @@
 	color: red;
 }
 
+.Calendars_addToCalendar_buttons {
+	text-align: center;
+}
+.Calendars_addToCalendar_button {
+	margin: 10px;
+}
+.Calendars_addToCalendar_button img {
+	width: 80px;
+}
+
 /************** Calendars Payment ********************************/
 /* horizontal preloader */
 #page button[data-loading=true],
@@ -166,6 +176,11 @@
 	background-position: center center;
 	background-size: cover;
 	pointer-events: none;
+}
+
+.Calendars_event_qrcode {
+	background: white;
+	padding: 20px;
 }
 
 
@@ -215,3 +230,4 @@
 	opacity: 0.7;
 }
 /* </livestream started notification template> */
+
